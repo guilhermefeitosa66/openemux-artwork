@@ -1,0 +1,104 @@
+name: Sync artwork
+
+on:
+  workflow_dispatch:
+    inputs:
+      systems:
+        description: >-
+          Space-separated system directories to sync (empty = all)
+        required: false
+        default: ""
+  schedule:
+    # Monthly: upstream thumbnail collections move slowly.
+    - cron: "17 4 3 * *"
+
+permissions:
+  contents: write
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      # Serial on purpose: every job pushes to main, and one writer at a time
+      # means no push ever races another.
+      max-parallel: 1
+      matrix:
+        system:
+          - Atari_-_2600
+          - Atari_-_5200
+          - Atari_-_7800
+          - Atari_-_Lynx
+          - Bandai_-_WonderSwan
+          - Coleco_-_ColecoVision
+          - GCE_-_Vectrex
+          - Magnavox_-_Odyssey2
+          - Mattel_-_Intellivision
+          - NEC_-_PC_Engine_-_TurboGrafx_16
+          - NEC_-_PC_Engine_CD_-_TurboGrafx-CD
+          - Nintendo_-_Family_Computer_Disk_System
+          - Nintendo_-_Game_Boy
+          - Nintendo_-_Game_Boy_Advance
+          - Nintendo_-_Game_Boy_Color
+          - Nintendo_-_GameCube
+          - Nintendo_-_Nintendo_64
+          - Nintendo_-_Nintendo_DS
+          - Nintendo_-_Nintendo_Entertainment_System
+          - Nintendo_-_Super_Nintendo_Entertainment_System
+          - Nintendo_-_Virtual_Boy
+          - SNK_-_Neo_Geo_Pocket
+          - Sega_-_32X
+          - Sega_-_Game_Gear
+          - Sega_-_Master_System_-_Mark_III
+          - Sega_-_Mega-CD_-_Sega_CD
+          - Sega_-_Mega_Drive_-_Genesis
+          - Sega_-_SG-1000
+          - Sega_-_Saturn
+          - Sony_-_PlayStation
+          - Sony_-_PlayStation_Portable
+    steps:
+      - name: Skip when filtered out
+        id: gate
+        env:
+          FILTER: ${{ inputs.systems }}
+        run: |
+          if [ -z "$FILTER" ] || echo " $FILTER " | grep -qF " ${{ matrix.system }} "; then
+            echo "run=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "run=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - uses: actions/checkout@v4
+        if: steps.gate.outputs.run == 'true'
+
+      - uses: actions/setup-python@v5
+        if: steps.gate.outputs.run == 'true'
+        with:
+          python-version: "3.12"
+
+      - name: Install Pillow
+        if: steps.gate.outputs.run == 'true'
+        run: pip install --quiet Pillow
+
+      - name: Sync ${{ matrix.system }}
+        if: steps.gate.outputs.run == 'true'
+        run: python scripts/sync_system.py "${{ matrix.system }}"
+
+      - name: Commit and push
+        if: steps.gate.outputs.run == 'true'
+        run: |
+          git config user.name "openemux-artwork-sync"
+          git config user.email "actions@users.noreply.github.com"
+          git add -A "${{ matrix.system }}"
+          if git diff --cached --quiet; then
+            echo "no changes"
+            exit 0
+          fi
+          git commit -m "sync: ${{ matrix.system }}"
+          # max-parallel=1 makes a race unlikely, but a manual commit landing
+          # mid-run is still possible; rebase and retry a few times.
+          for attempt in 1 2 3; do
+            if git push; then exit 0; fi
+            git pull --rebase
+          done
+          git push
